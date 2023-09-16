@@ -1,9 +1,13 @@
 import torch.cuda
+import torch.nn.functional as F
 
 from dataclasses import dataclass
+from sklearn.metrics import roc_auc_score
+from torch import nn
 from torch.utils.data import DataLoader
 from src.config import DinConfig
 from src.dataset import AmazonDataset
+from src.model import DeepInterestNetwork
 
 
 @dataclass
@@ -45,8 +49,21 @@ class Trainer:
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+        self.model, self.optimizer = self._init_model_and_optimizer(device_count)
+
         print(f"Totally {len(train_dataset)} / {len(test_dataset)} (train / test) samples, "
               f"{len(self.train_dataloader)} / {len(self.test_dataloader)} (train / test) batches.")
+
+    def _init_model_and_optimizer(self, device_count: int):
+        model = DeepInterestNetwork(config=self.args.model_config)
+
+        optimizer = torch.optim.Adam(model.parameters(),
+                                     lr=self.args.learning_rate,
+                                     betas=(self.args.adam_beta1, self.args.adam_beta2))
+        if device_count > 1:
+            model = nn.DataParallel(model)
+        model = model.to(self.device)
+        return model, optimizer
 
     def _collate(self, batch_inputs):
         batch_user, batch_material, batch_category = [], [], []
@@ -87,17 +104,53 @@ class Trainer:
         return (padded_data, mask) if return_mask else padded_data
 
     def train(self):
+        global_step = 1
         for epoch_idx in range(self.args.num_epochs):
             for batch_idx, batch_inputs in enumerate(self.train_dataloader, start=1):
+                self.model.train()
                 inputs = {k: v.to(self.device) for k, v in batch_inputs.items() if k != "label"}
                 labels = batch_inputs["label"].to(self.device)
+                self.model.zero_grad()
+                output_logits = self.model(**inputs)
+                loss = F.cross_entropy(output_logits, labels, reduction="mean")
+                loss.backward()
+                self.optimizer.step()
 
-                print(inputs["uid"].shape)
-                print(inputs["mid"].shape)
-                print(inputs["cat"].shape)
-                print(inputs["historical_mid"].shape)
-                print(inputs["historical_cat"].shape)
-                print(inputs["mask"].shape)
-                print(labels.shape)
-                break
-            break
+                pred = torch.argmax(output_logits, dim=-1)
+                accuracy = (pred == labels).float().mean()
+                auc = roc_auc_score(pred.detach().cpu(), labels.detach().cpu())
+
+                global_step += 1
+
+                if global_step % self.args.logging_steps:
+                    print(f"[Train] global step: {global_step:<5}, loss: {loss.item():.5f}, "
+                          f"accuracy: {accuracy:.5f}, auc: {auc:.5f}")
+
+                if global_step % self.args.evaluate_steps:
+                    self.evaluate(global_step)
+
+    def evaluate(self, global_step: int):
+        self.model.eval()
+
+        total_loss = 0.0
+        predictions, references = [], []
+        for batch_idx, batch_inputs in enumerate(self.test_dataloader, start=1):
+            inputs = {k: v.to(self.device) for k, v in batch_inputs.items() if k != "label"}
+            labels = batch_inputs["label"].to(self.device)
+            with torch.no_grad():
+                output_logits = self.model(**inputs)
+                loss = F.cross_entropy(output_logits, labels, reduction="sum")
+                total_loss += loss.item()
+                pred = torch.argmax(output_logits, dim=-1)
+                predictions.append(pred.detach().cpu())
+                references.append(labels.detach().cpu())
+
+        predictions = torch.cat(predictions, dim=0)
+        references = torch.cat(references, dim=0)
+
+        mean_loss = total_loss / predictions.size(0)
+        accuracy = (predictions == references).float().mean().item()
+        auc = roc_auc_score(predictions, references)
+
+        print(f"[Evaluate] global step: {global_step:<5}, loss: {mean_loss:.5f}, "
+              f"accuracy: {accuracy:.5f}, auc: {auc:.5f}")
