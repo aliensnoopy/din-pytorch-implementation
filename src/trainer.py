@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sklearn.metrics import roc_auc_score
 from torch import nn
 from torch.utils.data import DataLoader
-
+from torch.utils.tensorboard import SummaryWriter
 from src.collator import Collator
 from src.config import DinConfig
 from src.dataset import AmazonDataset
@@ -39,21 +39,23 @@ class Trainer:
         self.train_dataloader = DataLoader(dataset=train_dataset,
                                            batch_size=max(1, device_count) * args.batch_size,
                                            collate_fn=collator,
-                                           num_workers=1,
+                                           num_workers=8,
                                            shuffle=True,
-                                           pin_memory=False)
+                                           pin_memory=True)
 
         test_dataset = AmazonDataset(data_file=args.test_data_path)
         self.test_dataloader = DataLoader(dataset=test_dataset,
                                           batch_size=max(1, device_count) * args.batch_size,
                                           collate_fn=collator,
-                                          num_workers=1,
+                                          num_workers=8,
                                           shuffle=False,
-                                          pin_memory=False)
+                                          pin_memory=True)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.model, self.optimizer = self._init_model_and_optimizer(device_count)
+
+        self.writer = SummaryWriter(log_dir="logs")
 
         print(f"Totally {len(train_dataset)} / {len(test_dataset)} (train / test) samples, "
               f"{len(self.train_dataloader)} / {len(self.test_dataloader)} (train / test) batches.")
@@ -102,6 +104,9 @@ class Trainer:
                 if global_step % self.args.logging_steps == 0:
                     print(f"{'[Train]':<8} global step: {global_step:>4}, loss: {loss.item():.5f}, "
                           f"accuracy: {accuracy:.5f}, auc: {auc:.5f}")
+                    self.writer.add_scalar("loss/train", loss.item(), global_step)
+                    self.writer.add_scalar("accuracy/train", accuracy, global_step)
+                    self.writer.add_scalar("auc/train", auc, global_step)
 
                 if global_step % self.args.evaluate_steps == 0:
                     self.evaluate(global_step)
@@ -131,3 +136,7 @@ class Trainer:
 
         print(f"[Evaluate] global step: {global_step:>4}, loss: {mean_loss:.5f}, "
               f"accuracy: {accuracy:.5f}, auc: {auc:.5f}")
+        self.writer.add_scalar("loss/test", mean_loss, global_step)
+        self.writer.add_scalar("accuracy/test", accuracy, global_step)
+        self.writer.add_scalar("auc/test", auc, global_step)
+
