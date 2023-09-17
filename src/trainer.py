@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from sklearn.metrics import roc_auc_score
 from torch import nn
 from torch.utils.data import DataLoader
+
+from src.collator import Collator
 from src.config import DinConfig
 from src.dataset import AmazonDataset
 from src.model import DeepInterestNetwork
@@ -32,24 +34,24 @@ class Trainer:
         device_count = torch.cuda.device_count()
         print(f"There are {device_count} GPUs.")
 
+        collator = Collator(max_len=args.max_len)
         train_dataset = AmazonDataset(data_file=args.train_data_path)
         self.train_dataloader = DataLoader(dataset=train_dataset,
                                            batch_size=max(1, device_count) * args.batch_size,
-                                           collate_fn=self._collate,
-                                           num_workers=8,
+                                           collate_fn=collator,
+                                           num_workers=1,
                                            shuffle=True,
-                                           pin_memory=True)
+                                           pin_memory=False)
 
         test_dataset = AmazonDataset(data_file=args.test_data_path)
         self.test_dataloader = DataLoader(dataset=test_dataset,
                                           batch_size=max(1, device_count) * args.batch_size,
-                                          collate_fn=self._collate,
-                                          num_workers=8,
+                                          collate_fn=collator,
+                                          num_workers=1,
                                           shuffle=False,
-                                          pin_memory=True)
+                                          pin_memory=False)
 
-        # self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.device = torch.device("cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.model, self.optimizer = self._init_model_and_optimizer(device_count)
 
@@ -60,17 +62,13 @@ class Trainer:
         model = DeepInterestNetwork(config=self.args.model_config)
 
         def weights_init(m):
-            try:
-                clazz = m.__class__.__name__
-                if clazz.find("BatchNorm") != -1:
-                    nn.init.normal_(m.weight.data, 1.0, 0.02)
-                    nn.init.constant_(m.bias.data, 0)
-                elif clazz.find("Linear") != -1:
-                    nn.init.normal_(m.weight.data, 0.0, 0.02)
-                elif clazz.find("Embedding") != -1:
-                    m.weight.data.uniform_(-1, 1)
-            except AttributeError:
-                print("AttributeError:", clazz)
+            if isinstance(m, nn.BatchNorm1d):
+                nn.init.normal_(m.weight.data, 1.0, 0.02)
+                nn.init.constant_(m.bias.data, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight.data, 0.0, 0.02)
+            elif isinstance(m, nn.Embedding):
+                nn.init.uniform_(m.weight.data, -1, 1)
 
         optimizer = torch.optim.Adam(model.parameters(),
                                      lr=self.args.learning_rate,
@@ -81,44 +79,6 @@ class Trainer:
         model.apply(weights_init)
 
         return model, optimizer
-
-    def _collate(self, batch_inputs):
-        batch_user, batch_material, batch_category = [], [], []
-        batch_historical_material, batch_historical_category = [], []
-        batch_mask, batch_label = [], []
-
-        for data_dict in batch_inputs:
-            batch_user.append(data_dict["uid"])
-            batch_material.append(data_dict["mid"])
-            batch_category.append(data_dict["cat"])
-
-            historical_material = data_dict["historical_mid"]
-            padded_historical_material, mask = self._pad_sequence(historical_material, return_mask=True)
-            batch_historical_material.append(padded_historical_material)
-
-            historical_category = data_dict["historical_cat"]
-            padded_historical_category = self._pad_sequence(historical_category)
-            batch_historical_category.append(padded_historical_category)
-
-            batch_mask.append(mask)
-            batch_label.append(data_dict["label"])
-
-        return {
-            "uid": torch.tensor(batch_user, dtype=torch.long),
-            "mid": torch.tensor(batch_material, dtype=torch.long),
-            "cat": torch.tensor(batch_category, dtype=torch.long),
-            "historical_mid": torch.tensor(batch_historical_material, dtype=torch.long),
-            "historical_cat": torch.tensor(batch_historical_category, dtype=torch.long),
-            "mask": torch.tensor(batch_mask, dtype=torch.long),
-            "label": torch.tensor(batch_label, dtype=torch.long)
-        }
-
-    def _pad_sequence(self, seq_data, return_mask=False):
-        effective_len = min(self.args.max_len, len(seq_data))
-        padded_data = seq_data[-effective_len:] + [0] * (self.args.max_len - effective_len)
-        mask = [1] * effective_len + [0] * (self.args.max_len - effective_len)
-
-        return (padded_data, mask) if return_mask else padded_data
 
     def train(self):
         global_step = 1
