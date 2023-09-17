@@ -30,6 +30,7 @@ class Trainer:
         super().__init__()
         self.args = args
         device_count = torch.cuda.device_count()
+        print(f"There are {device_count} GPUs.")
 
         train_dataset = AmazonDataset(data_file=args.train_data_path)
         self.train_dataloader = DataLoader(dataset=train_dataset,
@@ -47,7 +48,8 @@ class Trainer:
                                           shuffle=False,
                                           pin_memory=True)
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cpu")
 
         self.model, self.optimizer = self._init_model_and_optimizer(device_count)
 
@@ -57,12 +59,27 @@ class Trainer:
     def _init_model_and_optimizer(self, device_count: int):
         model = DeepInterestNetwork(config=self.args.model_config)
 
+        def weights_init(m):
+            try:
+                clazz = m.__class__.__name__
+                if clazz.find("BatchNorm") != -1:
+                    nn.init.normal_(m.weight.data, 1.0, 0.02)
+                    nn.init.constant_(m.bias.data, 0)
+                elif clazz.find("Linear") != -1:
+                    nn.init.normal_(m.weight.data, 0.0, 0.02)
+                elif clazz.find("Embedding") != -1:
+                    m.weight.data.uniform_(-1, 1)
+            except AttributeError:
+                print("AttributeError:", clazz)
+
         optimizer = torch.optim.Adam(model.parameters(),
                                      lr=self.args.learning_rate,
                                      betas=(self.args.adam_beta1, self.args.adam_beta2))
         if device_count > 1:
             model = nn.DataParallel(model)
         model = model.to(self.device)
+        model.apply(weights_init)
+
         return model, optimizer
 
     def _collate(self, batch_inputs):
@@ -117,16 +134,16 @@ class Trainer:
                 self.optimizer.step()
 
                 pred = torch.argmax(output_logits, dim=-1)
-                accuracy = (pred == labels).float().mean()
-                auc = roc_auc_score(pred.detach().cpu(), labels.detach().cpu())
+                accuracy = (pred == labels).float().mean().item()
+                auc = roc_auc_score(labels.detach().cpu(), pred.detach().cpu())
 
                 global_step += 1
 
-                if global_step % self.args.logging_steps:
-                    print(f"[Train] global step: {global_step:<5}, loss: {loss.item():.5f}, "
+                if global_step % self.args.logging_steps == 0:
+                    print(f"{'[Train]':<8} global step: {global_step:>4}, loss: {loss.item():.5f}, "
                           f"accuracy: {accuracy:.5f}, auc: {auc:.5f}")
 
-                if global_step % self.args.evaluate_steps:
+                if global_step % self.args.evaluate_steps == 0:
                     self.evaluate(global_step)
 
     def evaluate(self, global_step: int):
@@ -150,7 +167,7 @@ class Trainer:
 
         mean_loss = total_loss / predictions.size(0)
         accuracy = (predictions == references).float().mean().item()
-        auc = roc_auc_score(predictions, references)
+        auc = roc_auc_score(references, predictions)
 
-        print(f"[Evaluate] global step: {global_step:<5}, loss: {mean_loss:.5f}, "
+        print(f"[Evaluate] global step: {global_step:>4}, loss: {mean_loss:.5f}, "
               f"accuracy: {accuracy:.5f}, auc: {auc:.5f}")

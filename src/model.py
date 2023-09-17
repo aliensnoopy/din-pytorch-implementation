@@ -102,15 +102,15 @@ class DeepInterestNetwork(nn.Module):
 
         lau_embedding = self.lau_layer(current_item_embedding, historical_item_embedding, mask)
 
+        historical_item_embedding_sum = (historical_item_embedding * mask.unsqueeze(2)).sum(dim=1)
+        historical_item_embedding_mean = historical_item_embedding_sum / mask.sum(dim=1, keepdim=True)
+
         combinations = torch.cat([
             user_embedding,
             current_item_embedding,
             lau_embedding,
-            (historical_item_embedding * mask.unsqueeze(2)).mean(dim=1)
+            historical_item_embedding_mean
         ], dim=-1)  # B x T x 7D
 
         output_logits = self.mlp_layer(combinations)
         return output_logits
-
-
-

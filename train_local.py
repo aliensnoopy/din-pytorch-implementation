@@ -11,7 +11,7 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_data_path", type=str,
-                        default=os.path.join(DATA_DIR, "dev_data.parquet"))
+                        default=os.path.join(DATA_DIR, "train_data.parquet"))
     parser.add_argument("--test_data_path", type=str,
                         default=os.path.join(DATA_DIR, "test_data.parquet"))
     parser.add_argument("--max_len", type=int, default=100,
@@ -27,7 +27,7 @@ def parse_args():
                         help="The sizes of inner hidden layers for top MLP.")
     parser.add_argument("--mlp_activation_layer", type=str, default="LeakyReLU")
     parser.add_argument("--num_epochs", type=int, default=20)
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=2048)
     parser.add_argument("--learning_rate", type=float, default=1e-3)
     parser.add_argument("--adam_beta1", type=float, default=0.5)
     parser.add_argument("--adam_beta2", type=float, default=0.99)
