@@ -14,6 +14,7 @@ def parse_args():
                         default=os.path.join(DATA_DIR, "train_data.parquet"))
     parser.add_argument("--test_data_path", type=str,
                         default=os.path.join(DATA_DIR, "test_data.parquet"))
+    parser.add_argument("--log_dir", type=str, default=os.path.join(os.path.dirname(__file__), "logs"))
     parser.add_argument("--max_len", type=int, default=100,
                         help="Maximum number of historical items to attend.")
     parser.add_argument("--num_users", type=int, default=192403)
@@ -52,6 +53,7 @@ if __name__ == "__main__":
     training_args = TrainingArguments(model_config=model_config,
                                       train_data_path=args.train_data_path,
                                       test_data_path=args.test_data_path,
+                                      log_dir=args.log_dir,
                                       max_len=args.max_len,
                                       num_epochs=args.num_epochs,
                                       batch_size=args.batch_size,

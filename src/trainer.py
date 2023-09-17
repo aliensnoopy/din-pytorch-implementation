@@ -1,3 +1,5 @@
+import os
+
 import torch.cuda
 import torch.nn.functional as F
 
@@ -17,6 +19,7 @@ class TrainingArguments:
     model_config: DinConfig
     train_data_path: str
     test_data_path: str
+    log_dir: str
     max_len: int
     num_epochs: int
     batch_size: int
@@ -31,13 +34,13 @@ class Trainer:
     def __init__(self, args: TrainingArguments):
         super().__init__()
         self.args = args
-        device_count = torch.cuda.device_count()
-        print(f"There are {device_count} GPUs.")
+        self.device_count = torch.cuda.device_count()
+        print(f"There are {self.device_count} GPUs.")
 
         collator = Collator(max_len=args.max_len)
         train_dataset = AmazonDataset(data_file=args.train_data_path)
         self.train_dataloader = DataLoader(dataset=train_dataset,
-                                           batch_size=max(1, device_count) * args.batch_size,
+                                           batch_size=max(1, self.device_count) * args.batch_size,
                                            collate_fn=collator,
                                            num_workers=8,
                                            shuffle=True,
@@ -45,7 +48,7 @@ class Trainer:
 
         test_dataset = AmazonDataset(data_file=args.test_data_path)
         self.test_dataloader = DataLoader(dataset=test_dataset,
-                                          batch_size=max(1, device_count) * args.batch_size,
+                                          batch_size=max(1, self.device_count) * args.batch_size,
                                           collate_fn=collator,
                                           num_workers=8,
                                           shuffle=False,
@@ -53,17 +56,19 @@ class Trainer:
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.model, self.optimizer = self._init_model_and_optimizer(device_count)
+        self.model, self.optimizer = self._init_model_and_optimizer()
 
-        self.writer = SummaryWriter(log_dir="logs")
+        self.train_writer = self._init_metrics_writer("train")
+        self.test_writer = self._init_metrics_writer("test")
 
         print(f"Totally {len(train_dataset)} / {len(test_dataset)} (train / test) samples, "
               f"{len(self.train_dataloader)} / {len(self.test_dataloader)} (train / test) batches.")
 
-    def _init_model_and_optimizer(self, device_count: int):
+    def _init_model_and_optimizer(self):
         model = DeepInterestNetwork(config=self.args.model_config)
 
         def weights_init(m):
+
             if isinstance(m, nn.BatchNorm1d):
                 nn.init.normal_(m.weight.data, 1.0, 0.02)
                 nn.init.constant_(m.bias.data, 0)
@@ -75,15 +80,23 @@ class Trainer:
         optimizer = torch.optim.Adam(model.parameters(),
                                      lr=self.args.learning_rate,
                                      betas=(self.args.adam_beta1, self.args.adam_beta2))
-        if device_count > 1:
+        if self.device_count > 1:
             model = nn.DataParallel(model)
         model = model.to(self.device)
         model.apply(weights_init)
 
         return model, optimizer
 
+    def _init_metrics_writer(self, type: str):
+        metrics_dir = os.path.join(self.args.log_dir, "metrics", type)
+        if not os.path.exists(metrics_dir):
+            os.makedirs(metrics_dir)
+
+        return SummaryWriter(log_dir=metrics_dir)
+
     def train(self):
-        global_step = 1
+        global_step = 0
+        best_acc = 0.0
         for epoch_idx in range(self.args.num_epochs):
             for batch_idx, batch_inputs in enumerate(self.train_dataloader, start=1):
                 self.model.train()
@@ -99,17 +112,31 @@ class Trainer:
                 accuracy = (pred == labels).float().mean().item()
                 auc = roc_auc_score(labels.detach().cpu(), pred.detach().cpu())
 
-                global_step += 1
-
                 if global_step % self.args.logging_steps == 0:
-                    print(f"{'[Train]':<8} global step: {global_step:>4}, loss: {loss.item():.5f}, "
-                          f"accuracy: {accuracy:.5f}, auc: {auc:.5f}")
-                    self.writer.add_scalar("loss/train", loss.item(), global_step)
-                    self.writer.add_scalar("accuracy/train", accuracy, global_step)
-                    self.writer.add_scalar("auc/train", auc, global_step)
+                    print(f"{'[Train]':<9} epoch: {epoch_idx + 1:>2}, global step: {global_step:>4}, "
+                          f"loss: {loss.item():.5f}, accuracy: {accuracy:.5f}, auc: {auc:.5f}")
+                    self.train_writer.add_scalar("Loss", loss.item(), global_step)
+                    self.train_writer.add_scalar("Accuracy", accuracy, global_step)
+                    self.train_writer.add_scalar("AUC", auc, global_step)
+                    self.train_writer.flush()
 
                 if global_step % self.args.evaluate_steps == 0:
-                    self.evaluate(global_step)
+                    eval_acc = self.evaluate(global_step)
+                    if eval_acc > best_acc:
+                        best_acc = eval_acc
+                        self._save_model()
+
+                global_step += 1
+
+        self.train_writer.close()
+        self.test_writer.close()
+
+    def _save_model(self):
+        model = self.model.module if self.device_count > 1 else self.model
+        checkpoint_dir = os.path.join(self.args.log_dir, "checkpoint")
+        if not os.path.exists(checkpoint_dir):
+            os.makedirs(checkpoint_dir)
+        torch.save(model.state_dict(), os.path.join(checkpoint_dir, "best-checkpoint"))
 
     def evaluate(self, global_step: int):
         self.model.eval()
@@ -136,7 +163,10 @@ class Trainer:
 
         print(f"[Evaluate] global step: {global_step:>4}, loss: {mean_loss:.5f}, "
               f"accuracy: {accuracy:.5f}, auc: {auc:.5f}")
-        self.writer.add_scalar("loss/test", mean_loss, global_step)
-        self.writer.add_scalar("accuracy/test", accuracy, global_step)
-        self.writer.add_scalar("auc/test", auc, global_step)
+        self.test_writer.add_scalar("Loss", mean_loss, global_step)
+        self.test_writer.add_scalar("Accuracy", accuracy, global_step)
+        self.test_writer.add_scalar("AUC", auc, global_step)
+        self.test_writer.flush()
+
+        return accuracy
 
